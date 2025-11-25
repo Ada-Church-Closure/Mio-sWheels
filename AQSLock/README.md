@@ -1,5 +1,3 @@
----
-
 ## 第一部分：什么是 CAS (Compare-And-Swap)
 
 ### 1. 核心思想：乐观锁
@@ -36,7 +34,7 @@ CAS 是一种实现并发控制的机制，它体现了 **乐观锁 (Optimistic 
 
 假设我们有一个变量 `value`，我们想把它从 10 增加到 11。
 
-```
+```java
 // 初始状态：value = 10
 int value = 10;
 
@@ -76,7 +74,7 @@ if (success) {
 
 以 `AtomicInteger`的 `incrementAndGet()`(相当于 `i++`) 方法为例，我们来看它是如何用 CAS 实现的（简化版源码）：
 
-```
+```java
 public class AtomicInteger extends Number implements java.io.Serializable {
     // 使用 volatile 保证内存可见性
     private volatile int value;
