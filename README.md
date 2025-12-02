@@ -27,9 +27,9 @@ Why did I build this?
 
 This repository contains my hand-crafted implementations of various data structures and algorithms, **with no external dependencies**. Each implementation includes basic tests and aims for clarity and educational value over raw performance.
 
-- ### AQS/CLH Queue
+- ### **AQS/CLH Queue**
 
-- **Simple ThreadPool**
+- ### **Simple ThreadPool**
 
 
 

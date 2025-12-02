@@ -1,10 +1,13 @@
 package org.nunotaba;
 
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
+    List<Integer> integers = new ArrayList<>();
     public static void main(String[] args) {
         MyThreadPool myThreadPool = new MyThreadPool(2, 4, 1, TimeUnit.SECONDS, new ArrayBlockingQueue<>(2), new DiscardRejectHandle());
 
