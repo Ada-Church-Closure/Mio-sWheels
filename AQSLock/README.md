@@ -138,3 +138,195 @@ public class AtomicInteger extends Number implements java.io.Serializable {
 | **`synchronized`(悲观锁)** | **进厕所关门上锁**                 | 认为总有人抢坑位，所以一进来就把门锁上，独占资源。简单粗暴，但开销大。                                                                             |
 | **CAS (乐观锁机制)**       | **看一眼，没人就进去**             | 先探头看看坑位是否空闲（比较），如果没人，就进去并占住（交换）。如果发现有人（比较失败），就退出来等会儿再试（自旋）。                             |
 | **原子变量**               | **一个自带“无锁”机制的智能马桶** | 你按“冲水+计数”按钮（`incrementAndGet`），它内部会自动执行“看一眼、没人就冲水并+1”的逻辑，并保证整个过程不被打扰。你不需要关心它是怎么实现的。 |
+
+## 搞清楚了之后,我们来理解AQS
+
+AQS (AbstractQueuedSynchronizer) 的核心就两样东西：
+
+1. **资源状态 (`state`)**：一个 `volatile int`，代表锁是被占用还是空闲。
+2. **CLH 队列**：一个双向链表，用来存放抢不到锁、需要排队的线程。
+
+------
+
+### 一、 核心数据结构：CLH 队列的变体
+
+原生的 CLH 锁是一种**自旋锁**，基于单向链表。但 AQS 为了实现**阻塞锁**（让线程挂起而不是死循环空转），对 CLH 做了改造，变成了**双向链表**。
+
+#### 1. 节点（Node）的代码结构
+
+这是 AQS 内部静态类 `Node` 的核心字段：
+
+Java
+
+```java
+static final class Node {
+    // 线程的状态
+    // 0: 初始状态
+    // -1 (SIGNAL): 表示我的"后继节点"被挂起了(park)，我释放锁后必须唤醒它
+    // 1 (CANCELLED): 表示我等不及了(超时或中断)，要取消排队
+    volatile int waitStatus;
+
+    // 前驱指针（双向链表关键）
+    // 作用：1. 取消排队时用于移除节点 2. 也是为了能从尾部向前遍历
+    volatile Node prev;
+
+    // 后继指针
+    // 作用：我释放锁时，通过它找到下一个人去唤醒
+    volatile Node next;
+
+    // 真正排队的线程
+    volatile Thread thread;
+}
+```
+
+#### 2. AQS 骨架
+
+Java
+
+```java
+public abstract class AbstractQueuedSynchronizer {
+    // 锁的状态：0代表无锁，1代表持有锁，>1代表重入次数
+    private volatile int state;
+    
+    // 队列头结点（哨兵节点，不存真实线程，只是占位）
+    private transient volatile Node head;
+    
+    // 队列尾结点（新来的线程都插到这里）
+    private transient volatile Node tail;
+}
+```
+
+------
+
+### 二、 核心流程：加锁与排队 (Acquire)
+
+当一个线程调用 `lock.lock()` 时，底层其实是调用了 AQS 的 `acquire(1)`。
+
+#### 代码逻辑拆解：
+
+Java
+
+```java
+// 1. 入口方法
+public final void acquire(int arg) {
+    // 步骤 A: 尝试直接抢锁 (tryAcquire 由子类如 ReentrantLock 实现)
+    // 步骤 B: 抢不到? addWaiter 将自己封装成 Node 加入队尾
+    // 步骤 C: acquireQueued 在队列里"死循环"等待
+    if (!tryAcquire(arg) &&
+        acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+        selfInterrupt();
+}
+
+// 2. 加入队列 (addWaiter)
+private Node addWaiter(Node mode) {
+    Node node = new Node(Thread.currentThread(), mode);
+    // ... 省略快速尝试 CAS 插入尾部的代码 ...
+    enq(node); // 如果快速尝试失败，进入死循环用 CAS 强行插入队尾
+    return node;
+}
+
+// 3. 在队列中排队 (acquireQueued) - 這是最核心的“挂起”逻辑
+final boolean acquireQueued(final Node node, int arg) {
+    for (;;) { // 死循环，直到拿到锁
+        // 获取我的前驱节点
+        final Node p = node.predecessor();
+        
+        // 只有一种情况我有资格去尝试抢锁：
+        // 我的前驱是 head (说明我是队列里的第一个真实线程)
+        if (p == head && tryAcquire(arg)) {
+            setHead(node); // 我抢到了！我现在变成 head (哨兵)
+            p.next = null; // 断开旧 head，帮助 GC
+            return false;
+        }
+
+        // 抢失败了？或者我前面还有人？
+        // shouldPark... 检查前驱的状态，如果是 SIGNAL，说明前驱承诺会叫醒我
+        // parkAndCheckInterrupt 调用 LockSupport.park() 真正让线程挂起（睡着）
+        if (shouldParkAfterFailedAcquire(p, node) &&
+            parkAndCheckInterrupt())
+            interrupted = true;
+    }
+}
+```
+
+**关键点：**
+
+- **自旋 + 阻塞**：AQS 不是一直自旋（浪费 CPU），也不是立马阻塞。它是先检查一下能不能抢（前驱是 head），抢不到再找个“枕头”（前驱状态设为 SIGNAL）然后睡去（park）。
+
+------
+
+### 三、 核心流程：解锁与唤醒 (Release)
+
+当持有锁的线程调用 `lock.unlock()` 时：
+
+Java
+
+```java
+public final boolean release(int arg) {
+    // 1. 尝试释放状态 (state - 1)
+    if (tryRelease(arg)) {
+        Node h = head;
+        // 2. 如果队列里有人 (h != null) 且状态需要唤醒 (waitStatus != 0)
+        if (h != null && h.waitStatus != 0)
+            unparkSuccessor(h); // 唤醒头结点的后继
+        return true;
+    }
+    return false;
+}
+
+// 唤醒逻辑 (unparkSuccessor)
+private void unparkSuccessor(Node node) {
+    // node 是 head
+    Node s = node.next;
+    
+    // 特殊情况：如果 next 节点是 null 或者被取消了 (CANCELLED)
+    if (s == null || s.waitStatus > 0) {
+        s = null;
+        // 【高频考点】为什么要从 tail 往回找？
+        // 为了找到离 head 最近的那个【有效】节点
+        for (Node t = tail; t != null && t != node; t = t.prev)
+            if (t.waitStatus <= 0)
+                s = t;
+    }
+    
+    // 唤醒它
+    if (s != null)
+        LockSupport.unpark(s.thread);
+}
+```
+
+------
+
+### 四、 高频面试题（专门针对你的 Level）
+
+#### Q1: 为什么 AQS 的 CLH 队列要用“双向链表”，而原生的 CLH 是单向的？
+
+- **普通回答：** 方便操作。
+- **满分回答（结合源码）：**
+  1. **唤醒时的可靠性：** 在 `unparkSuccessor` 方法中，如果 `head.next` 节点发生了取消（Cancelled）或者断链，我们需要从 `tail` 指针向前遍历（`prev` 指针）来找到最靠前的有效节点进行唤醒。这是因为节点入队时是**先设置 prev，再设置 next**（`CAS` 操作无法原子性设置双向链接），所以从后往前遍历是数据结构上绝对安全的。
+  2. **取消排队：** 如果一个线程等待超时或被中断，需要从队列中移除。双向链表让我们可以快速获取前驱节点，从而完成链表的重连（`prev.next = next`）。
+
+#### Q2: 既然已经有了 Queue，为什么 `acquireQueued` 里还需要一个死循环 `for(;;)`？
+
+- **回答：** 这是一个**自旋**的过程。
+  - 当线程被唤醒（unpark）时，它并不是“直接”拿到锁，而是从 `parkAndCheckInterrupt()` 方法返回，重新进入 `for(;;)` 循环的下一次迭代。
+  - 它需要再次检查 `p == head && tryAcquire()`。因为在它被唤醒的瞬间，可能有一个**新来的线程**（非公平锁场景）插队抢走了锁。
+  - 如果没抢到，它必须再次挂起。这个循环保证了线程被唤醒后能正确地重新竞争锁。
+
+#### Q3: AQS 中的 `state` 为什么要用 `volatile` 修饰？
+
+- **回答：** 保证**可见性**。
+  - AQS 的核心就是通过 `state` 变量来判断锁是否被占用。多线程环境下，一个线程修改了 `state`（释放锁），其他线程必须立马看见，否则会导致死锁或重复加锁。
+  - 配合 `CAS`（`compareAndSetState`）操作，保证了状态更新的**原子性**。
+
+#### Q4: 简述一下 ReentrantLock 的公平锁和非公平锁在 AQS 层面的区别？
+
+- **回答：** 区别只在于 `tryAcquire`（尝试抢锁）的逻辑不同。
+  - **非公平锁 (Nonfair)：** 线程一进来，不管队列里有没有人，先直接 CAS 尝试改 `state` 抢锁。抢不到才排队。
+  - **公平锁 (Fair)：** 线程进来前，会先调用 `hasQueuedPredecessors()` 问一下：“队列里有人在排队吗？”。如果有，自己老实去排队，绝不尝试 CAS。
+
+#### Q5: 你觉得 AQS 的设计模式是什么？
+
+- **回答：** **模板方法模式 (Template Method Pattern)**。
+  - AQS 提供了 `acquire`, `release` 等顶层流程骨架（这些是 `final` 的，不可重写）。
+  - 具体的资源获取/释放逻辑（`tryAcquire`, `tryRelease`）留给子类（如 `ReentrantLock`, `CountDownLatch`）去实现。
