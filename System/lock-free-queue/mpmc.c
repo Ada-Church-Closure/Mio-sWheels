@@ -98,6 +98,8 @@ int queue_dequeue(mpmc_queue_t *q, void **data) {
     *data = cell->data;
     // 这里加上一整圈即可
     // 最精妙的就在于生产者消费者的序列号问题.
+    // 生产者每次会加一,消费者每次竞争的位置就会刚好落后生产者1
+    // 每次消费者消费结束之后会给数字整个加上一轮
     atomic_store_explicit(&cell->sequence_number, pos + q->buffer_mask + 1, memory_order_release);
     return 1;
 } 
