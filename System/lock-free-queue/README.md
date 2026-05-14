@@ -3,7 +3,7 @@
 本目录实现的是经典的 **Dmitry Vyukov 风格有界多生产者多消费者（MPMC）环形队列**：用 **单调递增的全局位置** 分配槽位，用 **每个槽位上的序号（`sequence_number`）** 表达「空 / 已写入待取 / 已取走待下一轮写入」三种逻辑状态；槽位争用通过 **`enqueue_pos` / `dequeue_pos` 上的 CAS** 解决，槽位与 `data` 的可见性通过 **`release` / `acquire` 成对** 保证。
 
 下文按「数据结构 → 缓存行 → 环上序号与轮转 → CAS 流程 → 内存序」的顺序说明，并与 `mpmc.h` / `mpmc.c` 中的实现对齐。
-
+<img width="5828" height="6110" alt="Image" src="https://github.com/user-attachments/assets/08f635c4-cb9e-4197-95c4-5574f8e2faf8" />
 ---
 
 ## 1. 核心思路（为什么同时需要「位置」和「槽位序号」）
