@@ -87,7 +87,7 @@ int queue_dequeue(mpmc_queue_t *q, void **data) {
                     break;
                 }
         } else if (diff < 0) {
-            // 队列满了
+            // 队列为空
             return 0;
         } else {
             pos = atomic_load_explicit(&q->dequeue_pos, memory_order_relaxed);
